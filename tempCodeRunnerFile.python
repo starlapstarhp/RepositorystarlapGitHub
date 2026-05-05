@@ -1,0 +1,160 @@
+import os
+import platform
+import sqlite3
+import pandas as pd
+import flet as ft
+from flet import *
+from reportlab.lib import colors
+from reportlab.platypus import TableStyle, SimpleDocTemplate, Table, Paragraph
+from reportlab.lib.units import mm
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import getSampleStyleSheet
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+# --- 1. إعداد المسارات (مهم جداً للأندرويد) ---
+# المسار الذي سيتم تخزين قاعدة البيانات والملفات المصدرة فيه
+data_dir = os.environ.get("FLET_APP_STORAGE_DATA", os.getcwd())
+db_path = os.path.join(data_dir, "company.db")
+
+# مسار الخط العربي (يجب وضع ملف arial.ttf داخل مجلد اسمه assets)
+# عند التحويل، Flet سيعتبر assets هو المجلد الرئيسي للجذر
+font_path = "assets/arial.ttf"
+
+def fix_arabic(text):
+    if text is None: return ""
+    reshaped_text = arabic_reshaper.reshape(str(text))
+    return get_display(reshaped_text)
+
+# تسجيل الخط
+try:
+    pdfmetrics.registerFont(TTFont('ArabicFont', font_path))
+except:
+    print("Warning: Font file not found at", font_path)
+
+class DatabaseHelper:
+    def __init__(self):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.create_table()
+
+    def create_table(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                job_title TEXT NOT NULL,
+                salary REAL NOT NULL,
+                is_active INTEGER DEFAULT 1 
+            )
+        """)
+        self.conn.commit()
+
+    def add_employee(self, name, job, salary):
+        self.cursor.execute("INSERT INTO employees (name, job_title, salary, is_active) VALUES (?, ?, ?, 1)", (name, job, salary))
+        self.conn.commit()
+
+    def get_all_employees(self):
+        self.cursor.execute("SELECT * FROM employees ORDER BY id DESC")
+        return self.cursor.fetchall()
+
+    def delete_employee(self, emp_id):
+        self.cursor.execute("DELETE FROM employees WHERE id = ?", (emp_id,))
+        self.conn.commit()
+
+    def update_status__employee(self, emp_id, value):
+        self.cursor.execute("UPDATE employees SET is_active = ? WHERE id = ?", (int(value), emp_id))
+        self.conn.commit()
+
+def main(page: Page):
+    page.title = "نظام إدارة الموظفين"
+    page.rtl = True
+    page.theme_mode = ThemeMode.LIGHT
+    page.scroll = ScrollMode.AUTO
+    
+    db = DatabaseHelper()
+
+    name_field = TextField(label="اسم الموظف", expand=True)
+    job_field = TextField(label="المسمى الوظيفي", expand=True)
+    salary_field = TextField(label="الراتب", keyboard_type=KeyboardType.NUMBER, expand=True)
+
+    my_dt = DataTable(
+        columns=[
+            DataColumn(Text("ID")),
+            DataColumn(Text("الاسم")),
+            DataColumn(Text("الوظيفة")),
+            DataColumn(Text("الراتب")),
+            DataColumn(Text("حذف")),
+            DataColumn(Text("نشط")),
+        ],
+        rows=[]
+    )
+
+    def load_data():
+        my_dt.rows.clear()
+        for x in db.get_all_employees():
+            my_dt.rows.append(DataRow(
+                cells=[
+                    DataCell(Text(str(x[0]))),
+                    DataCell(Text(x[1])),
+                    DataCell(Text(x[2])),
+                    DataCell(Text(str(x[3]))),
+                    DataCell(IconButton(icons.Icons.DELETE, icon_color="red", on_click=lambda e, id=x[0]: delete_clicked(id))),
+                    DataCell(Checkbox(value=bool(x[4]), on_change=lambda e, id=x[0]: update_status(id, e.control.value)))
+                ]
+            ))
+        page.update()
+
+    def add_clicked(e):
+        if name_field.value and job_field.value and salary_field.value:
+            try:
+                db.add_employee(name_field.value, job_field.value, float(salary_field.value))
+                name_field.value = ""; job_field.value = ""; salary_field.value = ""
+                load_data()
+                page.snack_bar = SnackBar(Text("تم الحفظ بنجاح")); page.snack_bar.open = True
+            except: pass
+        page.update()
+
+    def delete_clicked(id):
+        db.delete_employee(id)
+        load_data()
+
+    def update_status(id, val):
+        db.update_status__employee(id, val)
+        load_data()
+
+    def printpdfnow(e):
+        output_path = os.path.join(data_dir, "report.pdf")
+        doc = SimpleDocTemplate(output_path, pagesize=landscape(letter))
+        data = [[fix_arabic("الراتب"), fix_arabic("المسمى"), fix_arabic("الاسم"), fix_arabic("ID")]]
+        
+        for item in db.get_all_employees():
+            if item[4] == 1: # النشطين فقط
+                data.append([fix_arabic(item[3]), fix_arabic(item[2]), fix_arabic(item[1]), fix_arabic(item[0])])
+        
+        table = Table(data)
+        table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'ArabicFont'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ]))
+        doc.build([table])
+        page.launch_url(f"file://{output_path}")
+
+    page.add(
+        Column([
+            Text("إدارة الموظفين", size=30, weight="bold"),
+            Row([name_field, job_field, salary_field]),
+            ElevatedButton("حفظ", icon=icons.Icons.SAVE, on_click=add_clicked),
+            Row([
+                ElevatedButton("PDF", icon=icons.Icons.PICTURE_AS_PDF, on_click=printpdfnow),
+            ]),
+            Divider(),
+            Row([my_dt], scroll=ScrollMode.ALWAYS)
+        ])
+    )
+    load_data()
+
+ft.app(target=main, assets_dir="assets")

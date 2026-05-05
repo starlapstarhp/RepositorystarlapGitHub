@@ -1,0 +1,6 @@
+flet
+pandas
+xlsxwriter
+reportlab
+arabic-reshaper
+python-bidi
